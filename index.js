@@ -3,6 +3,7 @@ const { Telegraf, Markup } = require('telegraf');
 const cron = require('node-cron');
 const connectDB = require('./db/connection');
 const Website = require('./models/Website');
+const User = require('./models/User');
 const { checkAllWebsites, checkWebsite } = require('./services/monitorService');
 
 // Подключение к базе данных
@@ -10,6 +11,36 @@ connectDB();
 
 // Создание экземпляра бота
 const bot = new Telegraf(process.env.BOT_TOKEN);
+
+// Список админ ID из переменных окружения
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',') : [];
+
+// Функция для проверки прав администратора
+function isAdmin(chatId) {
+    return ADMIN_IDS.includes(chatId.toString());
+}
+
+// Функция для регистрации/обновления пользователя
+async function registerUser(ctx) {
+    const chatId = ctx.chat.id.toString();
+    const userInfo = {
+        chatId: chatId,
+        username: ctx.from.username || '',
+        firstName: ctx.from.first_name || '',
+        lastName: ctx.from.last_name || '',
+        lastActivity: Date.now()
+    };
+
+    try {
+        await User.findOneAndUpdate(
+            { chatId: chatId },
+            userInfo,
+            { upsert: true, new: true }
+        );
+    } catch (error) {
+        console.error('Ошибка при регистрации пользователя:', error);
+    }
+}
 
 // Функция для создания главного меню с кнопками
 function getMainMenu() {
@@ -20,8 +51,27 @@ function getMainMenu() {
     ]).resize();
 }
 
+// Функция для создания админского меню
+function getAdminMenu() {
+    return Markup.keyboard([
+        ['🆕 Добавить сайт', '📋 Список сайтов'],
+        ['🔄 Проверить сейчас', '📊 Статус'],
+        ['👥 Пользователи', '📈 Статистика'],
+        ['❓ Помощь']
+    ]).resize();
+}
+
+// Функция для получения правильного меню в зависимости от роли пользователя
+function getUserMenu(chatId) {
+    return isAdmin(chatId) ? getAdminMenu() : getMainMenu();
+}
+
 // Обработчик команды /start
 bot.start(async (ctx) => {
+    await registerUser(ctx);
+    const chatId = ctx.chat.id.toString();
+    const menu = getUserMenu(chatId);
+    
     await ctx.reply(
         'Привет! Я бот для мониторинга доступности сайтов.\n' +
         'Используйте кнопки ниже или следующие команды:\n' +
@@ -29,7 +79,7 @@ bot.start(async (ctx) => {
         '/list - просмотреть список отслеживаемых сайтов\n' +
         '/check - немедленно проверить все сайты\n' +
         '/help - показать справку',
-        getMainMenu()
+        menu
     );
 });
 
@@ -44,6 +94,29 @@ bot.help((ctx) => {
         '/check - немедленно проверить все сайты\n' +
         '/status - показать текущий статус всех сайтов',
         getMainMenu()
+    );
+});
+
+// Админская команда help
+bot.command('admin_help', (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    
+    ctx.reply(
+        '🔧 Админские команды:\n\n' +
+        '📊 Просмотр данных:\n' +
+        '• 👥 Пользователи - список всех пользователей\n' +
+        '• 📈 Статистика - общая статистика системы\n' +
+        '/users - список пользователей (команда)\n' +
+        '/stats - статистика (команда)\n\n' +
+        '🔍 Управление:\n' +
+        '/user_info <chatId> - информация о пользователе\n' +
+        '/sync_users - синхронизация счетчиков пользователей\n\n' +
+        'ℹ️ Настройка:\n' +
+        'Для назначения админов добавьте их chat ID в переменную окружения ADMIN_IDS через запятую',
+        getAdminMenu()
     );
 });
 
@@ -67,17 +140,43 @@ bot.hears('📊 Статус', async (ctx) => {
 });
 
 bot.hears('❓ Помощь', (ctx) => {
-    ctx.reply(
-        'Список доступных команд:\n' +
+    const chatId = ctx.chat.id.toString();
+    const menu = getUserMenu(chatId);
+    
+    let helpMessage = 'Список доступных команд:\n' +
         '• 🆕 Добавить сайт - добавить новый сайт для мониторинга\n' +
         '• 📋 Список сайтов - просмотреть список отслеживаемых сайтов\n' +
         '• 🔄 Проверить сейчас - немедленно проверить все сайты\n' +
         '• 📊 Статус - показать текущий статус всех сайтов\n\n' +
         'Дополнительные команды:\n' +
         '/edit <id> - редактировать сайт\n' +
-        '/delete <id> - удалить сайт из мониторинга',
-        getMainMenu()
-    );
+        '/delete <id> - удалить сайт из мониторинга';
+    
+    if (isAdmin(chatId)) {
+        helpMessage += '\n\n🔧 Админские команды:\n' +
+            '• 👥 Пользователи - список всех пользователей\n' +
+            '• 📈 Статистика - статистика системы\n' +
+            '/admin_help - подробная справка для админов';
+    }
+    
+    ctx.reply(helpMessage, menu);
+});
+
+// Админские обработчики кнопок
+bot.hears('👥 Пользователи', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    await showUsers(ctx);
+});
+
+bot.hears('📈 Статистика', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    await showStatistics(ctx);
 });
 
 // Состояния пользовательских сессий
@@ -138,6 +237,12 @@ bot.on('text', async (ctx) => {
                     });
 
                     await newWebsite.save();
+
+                    // Обновляем счетчик сайтов пользователя
+                    await User.findOneAndUpdate(
+                        { chatId: chatId },
+                        { $inc: { websiteCount: 1 } }
+                    );
 
                     // Сразу проверяем сайт
                     const result = await checkWebsite(newWebsite);
@@ -312,11 +417,25 @@ bot.action(/confirm_delete_(.+)/, async (ctx) => {
         // Если chatIds содержит только текущий chatId, удаляем сайт полностью
         if (website.chatIds.length === 1) {
             await Website.findByIdAndDelete(websiteId);
+            
+            // Обновляем счетчик сайтов пользователя
+            await User.findOneAndUpdate(
+                { chatId: chatId },
+                { $inc: { websiteCount: -1 } }
+            );
+            
             ctx.reply(`Сайт "${website.name}" полностью удален из мониторинга.`, getMainMenu());
         } else {
             // Иначе удаляем только текущий chatId из списка
             website.chatIds = website.chatIds.filter(id => id !== chatId);
             await website.save();
+            
+            // Обновляем счетчик сайтов пользователя
+            await User.findOneAndUpdate(
+                { chatId: chatId },
+                { $inc: { websiteCount: -1 } }
+            );
+            
             ctx.reply(`Вы отписались от уведомлений сайта "${website.name}".`, getMainMenu());
         }
         ctx.answerCbQuery('Сайт успешно удален.');
@@ -560,6 +679,207 @@ cron.schedule('*/5 * * * *', () => {
 bot.catch((err, ctx) => {
     console.error(`Ошибка для ${ctx.updateType}:`, err);
     ctx.reply('Произошла ошибка при обработке запроса. Пожалуйста, попробуйте позже.', getMainMenu());
+});
+
+// Админские функции
+async function showUsers(ctx) {
+    try {
+        const users = await User.find({}).sort({ createdAt: -1 });
+        const totalUsers = users.length;
+        const activeUsers = users.filter(user => user.isActive).length;
+        
+        if (totalUsers === 0) {
+            return ctx.reply('Пользователи не найдены.', getAdminMenu());
+        }
+
+        let message = `👥 Пользователи (${totalUsers} всего, ${activeUsers} активных):\n\n`;
+        
+        for (const user of users.slice(0, 20)) { // Показываем первых 20 пользователей
+            const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Без имени';
+            const status = user.isActive ? '✅' : '❌';
+            const lastActivity = new Date(user.lastActivity).toLocaleDateString();
+            
+            message += `${status} ${name}\n`;
+            message += `   ID: ${user.chatId}\n`;
+            message += `   Username: @${user.username || 'нет'}\n`;
+            message += `   Сайтов: ${user.websiteCount}\n`;
+            message += `   Последняя активность: ${lastActivity}\n\n`;
+        }
+        
+        if (totalUsers > 20) {
+            message += `... и еще ${totalUsers - 20} пользователей\n`;
+        }
+
+        // Создаем инлайн-кнопки для дополнительных действий
+        const keyboard = Markup.inlineKeyboard([
+            [Markup.button.callback('📊 Подробная статистика', 'admin_detailed_stats')],
+            [Markup.button.callback('🔄 Обновить', 'admin_refresh_users')]
+        ]);
+
+        await ctx.reply(message, keyboard);
+    } catch (error) {
+        console.error('Ошибка при получении списка пользователей:', error);
+        ctx.reply('Произошла ошибка при получении списка пользователей.', getAdminMenu());
+    }
+}
+
+async function showStatistics(ctx) {
+    try {
+        const [userStats, websiteStats] = await Promise.all([
+            User.aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        totalUsers: { $sum: 1 },
+                        activeUsers: { $sum: { $cond: ['$isActive', 1, 0] } },
+                        totalWebsites: { $sum: '$websiteCount' }
+                    }
+                }
+            ]),
+            Website.aggregate([
+                {
+                    $group: {
+                        _id: null,
+                        totalWebsites: { $sum: 1 },
+                        onlineWebsites: { $sum: { $cond: [{ $eq: ['$status', 'online'] }, 1, 0] } },
+                        offlineWebsites: { $sum: { $cond: [{ $eq: ['$status', 'offline'] }, 1, 0] } },
+                        totalSubscriptions: { $sum: { $size: '$chatIds' } }
+                    }
+                }
+            ])
+        ]);
+
+        const userStat = userStats[0] || { totalUsers: 0, activeUsers: 0, totalWebsites: 0 };
+        const websiteStat = websiteStats[0] || { totalWebsites: 0, onlineWebsites: 0, offlineWebsites: 0, totalSubscriptions: 0 };
+
+        const message = `📈 Статистика системы:\n\n` +
+            `👥 Пользователи:\n` +
+            `• Всего пользователей: ${userStat.totalUsers}\n` +
+            `• Активных пользователей: ${userStat.activeUsers}\n\n` +
+            `🌐 Сайты:\n` +
+            `• Всего сайтов: ${websiteStat.totalWebsites}\n` +
+            `• Онлайн: ${websiteStat.onlineWebsites}\n` +
+            `• Офлайн: ${websiteStat.offlineWebsites}\n` +
+            `• Всего подписок: ${websiteStat.totalSubscriptions}\n\n` +
+            `📊 Дополнительно:\n` +
+            `• Среднее сайтов на пользователя: ${userStat.totalUsers > 0 ? (websiteStat.totalSubscriptions / userStat.totalUsers).toFixed(1) : 0}`;
+
+        await ctx.reply(message, getAdminMenu());
+    } catch (error) {
+        console.error('Ошибка при получении статистики:', error);
+        ctx.reply('Произошла ошибка при получении статистики.', getAdminMenu());
+    }
+}
+
+// Обработчики админских инлайн-кнопок
+bot.action('admin_detailed_stats', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.answerCbQuery('У вас нет прав для выполнения этой команды.');
+    }
+    await showStatistics(ctx);
+    ctx.answerCbQuery();
+});
+
+bot.action('admin_refresh_users', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.answerCbQuery('У вас нет прав для выполнения этой команды.');
+    }
+    await showUsers(ctx);
+    ctx.answerCbQuery('Список обновлен');
+});
+
+// Админские команды
+bot.command('users', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    await showUsers(ctx);
+});
+
+bot.command('stats', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    await showStatistics(ctx);
+});
+
+bot.command('user_info', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    
+    const parts = ctx.message.text.split(' ');
+    if (parts.length < 2) {
+        return ctx.reply('Пожалуйста, укажите chat ID пользователя: /user_info <chatId>', getAdminMenu());
+    }
+    
+    const targetChatId = parts[1];
+    
+    try {
+        const user = await User.findOne({ chatId: targetChatId });
+        if (!user) {
+            return ctx.reply('Пользователь с указанным chat ID не найден.', getAdminMenu());
+        }
+        
+        const websites = await Website.find({ chatIds: targetChatId });
+        const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || user.username || 'Без имени';
+        
+        let message = `👤 Информация о пользователе:\n\n`;
+        message += `Имя: ${name}\n`;
+        message += `Username: @${user.username || 'нет'}\n`;
+        message += `Chat ID: ${user.chatId}\n`;
+        message += `Роль: ${user.role}\n`;
+        message += `Статус: ${user.isActive ? '✅ Активен' : '❌ Неактивен'}\n`;
+        message += `Зарегистрирован: ${new Date(user.createdAt).toLocaleString()}\n`;
+        message += `Последняя активность: ${new Date(user.lastActivity).toLocaleString()}\n`;
+        message += `Сайтов в счетчике: ${user.websiteCount}\n`;
+        message += `Реальное количество сайтов: ${websites.length}\n\n`;
+        
+        if (websites.length > 0) {
+            message += `🌐 Отслеживаемые сайты:\n`;
+            websites.forEach((site, index) => {
+                const statusEmoji = site.status === 'online' ? '✅' : (site.status === 'offline' ? '❌' : '⚠️');
+                message += `${index + 1}. ${statusEmoji} ${site.name} (${site.url})\n`;
+            });
+        }
+        
+        ctx.reply(message, getAdminMenu());
+    } catch (error) {
+        console.error('Ошибка при получении информации о пользователе:', error);
+        ctx.reply('Произошла ошибка при получении информации о пользователе.', getAdminMenu());
+    }
+});
+
+bot.command('sync_users', async (ctx) => {
+    const chatId = ctx.chat.id.toString();
+    if (!isAdmin(chatId)) {
+        return ctx.reply('У вас нет прав для выполнения этой команды.');
+    }
+    
+    try {
+        ctx.reply('Запускаю синхронизацию счетчиков пользователей...');
+        
+        const users = await User.find({});
+        let syncedCount = 0;
+        
+        for (const user of users) {
+            const websiteCount = await Website.countDocuments({ chatIds: user.chatId });
+            if (user.websiteCount !== websiteCount) {
+                await User.findByIdAndUpdate(user._id, { websiteCount: websiteCount });
+                syncedCount++;
+            }
+        }
+        
+        ctx.reply(`✅ Синхронизация завершена. Обновлено пользователей: ${syncedCount}`, getAdminMenu());
+    } catch (error) {
+        console.error('Ошибка при синхронизации пользователей:', error);
+        ctx.reply('Произошла ошибка при синхронизации пользователей.', getAdminMenu());
+    }
 });
 
 // Запуск бота
